@@ -6,7 +6,9 @@ use axhal::trap::{register_trap_handler, SYSCALL};
 use axerrno::LinuxError;
 use axtask::current;
 use axtask::TaskExtRef;
+use axhal::mem::{MemoryAddr, VirtAddr, PAGE_SIZE_4K};
 use axhal::paging::MappingFlags;
+use alloc::vec;
 use arceos_posix_api as api;
 
 const SYS_IOCTL: usize = 29;
@@ -140,7 +142,38 @@ fn sys_mmap(
     fd: i32,
     _offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    let size = (length + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
+    let mflags = MappingFlags::from(MmapProt::from_bits_truncate(prot));
+
+    let curr = current();
+    let mut aspace = curr.task_ext().aspace.lock();
+
+    // No address hint: place the mapping right below the user stack.
+    let start = if addr.is_null() {
+        VirtAddr::from(
+            (aspace.end().as_usize() - crate::USER_STACK_SIZE - size) & !(PAGE_SIZE_4K - 1),
+        )
+    } else {
+        VirtAddr::from(addr as usize).align_down_4k()
+    };
+
+    if aspace.map_alloc(start, size, mflags, true).is_err() {
+        return -LinuxError::ENOMEM.code() as isize;
+    }
+
+    // Fill the mapping with the file content.
+    if fd >= 0 {
+        let mut buf = vec![0u8; size];
+        let n = api::sys_read(fd, buf.as_mut_ptr().cast(), size);
+        if n < 0 {
+            return n;
+        }
+        if aspace.write(start, &buf[..n as usize]).is_err() {
+            return -LinuxError::EINVAL.code() as isize;
+        }
+    }
+
+    start.as_usize() as isize
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {
