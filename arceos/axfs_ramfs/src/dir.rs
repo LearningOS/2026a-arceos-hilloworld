@@ -165,6 +165,31 @@ impl VfsNodeOps for DirNode {
         }
     }
 
+    fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
+        log::debug!("rename at ramfs: {} -> {}", src_path, dst_path);
+        let (src_name, src_rest) = split_path(src_path);
+        // `dst_path` may still carry the mount point prefix (e.g. "/tmp/f2"),
+        // so only its last component is the new name. Only rename in the same
+        // directory is supported, moving is not.
+        let dst_name = dst_path.trim_end_matches('/').rsplit('/').next().unwrap();
+        if let Some(rest) = src_rest {
+            let subdir = self
+                .children
+                .read()
+                .get(src_name)
+                .ok_or(VfsError::NotFound)?
+                .clone();
+            return subdir.rename(rest, dst_name);
+        }
+        let mut children = self.children.write();
+        if children.contains_key(dst_name) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let node = children.remove(src_name).ok_or(VfsError::NotFound)?;
+        children.insert(dst_name.into(), node);
+        Ok(())
+    }
+
     axfs_vfs::impl_vfs_dir_default! {}
 }
 
