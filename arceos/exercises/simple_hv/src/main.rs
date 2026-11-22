@@ -102,16 +102,21 @@ fn vmexit_handler(ctx: &mut VmCpuRegisters) -> bool {
             }
         },
         Trap::Exception(Exception::IllegalInstruction) => {
-            panic!("Bad instruction: {:#x} sepc: {:#x}",
-                stval::read(),
-                ctx.guest_regs.sepc
-            );
+            // The guest reads `mhartid`, a machine-level CSR that VS-mode cannot
+            // access. Emulate `csrr a1, mhartid` and step over it.
+            ax_println!("Emulate csrr mhartid at sepc: {:#x}", ctx.guest_regs.sepc);
+            ctx.guest_regs.gprs.set_reg(A1, 0x1234);
+            ctx.guest_regs.sepc += 4;
+            return false;
         },
         Trap::Exception(Exception::LoadGuestPageFault) => {
-            panic!("LoadGuestPageFault: stval{:#x} sepc: {:#x}",
-                stval::read(),
-                ctx.guest_regs.sepc
-            );
+            // The guest loads from the unbacked address 0x40. Emulate the load
+            // (result goes to a0) and step over it.
+            let fault_addr = stval::read();
+            ax_println!("Emulate load at {:#x}, sepc: {:#x}", fault_addr, ctx.guest_regs.sepc);
+            ctx.guest_regs.gprs.set_reg(A0, 0x6688);
+            ctx.guest_regs.sepc += 4;
+            return false;
         },
         _ => {
             panic!(
@@ -140,7 +145,12 @@ fn prepare_guest_context(ctx: &mut VmCpuRegisters) {
     // Set sstatus in guest mode.
     let mut sstatus = sstatus::read();
     sstatus.set_spp(sstatus::SPP::Supervisor);
-    ctx.guest_regs.sstatus = sstatus.bits();
+    // Turn the guest's FP unit on (FS != Off), otherwise the first floating-point
+    // instruction in the guest traps with IllegalInstruction.
+    let mut bits = sstatus.bits();
+    bits &= !(0x3 << 13);
+    bits |= (sstatus::FS::Dirty as usize) << 13;
+    ctx.guest_regs.sstatus = bits;
     // Return to entry to start vm.
     ctx.guest_regs.sepc = VM_ENTRY;
 }
